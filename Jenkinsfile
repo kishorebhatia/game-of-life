@@ -8,45 +8,50 @@
     4) Credentials with the id of "azure-deployment-id" containing the ftps user:password for deployment
 
 */
+#! groovy
 
-node ("linux") {
+//discard old builds
+properties([
+   [$class: 'BuildDiscarderProperty',
+      strategy: [$class: 'LogRotator', numToKeepStr: '10', artifactNumToKeepStr: '10']
+   ]
+])
 
-    def local_path="gameoflife-web/target"
-    def war="gameoflife.war"
-    def target="/site/wwwroot/webapps"
+node('java-build-tools && docker') {
+    echo "PWD: ${pwd()}"
 
-    ensureMaven()
+    stage 'Checkout'
+        //from Git, BitBucket, SVN, etc.
+        git 'https://github.com/kishorebhatia/game-of-life/PipelineBranch'
 
-    stage "Checkout"
-    git branch: 'azure-pipeline', url: 'https://github.com/harniman/game-of-life'
+    stage 'Compile, Unit'
+        //execute build command(s)
+        sh 'mvn clean javadoc:javadoc package'
 
-    stage "Build"
+    stage 'Archive'
+        //archive JUnit test results
+        step([$class: 'JUnitResultArchiver', testResults: '**/target/surefire-reports/TEST-*.xml'])
+        //archive JavaDocs
+        step([$class: 'JavadocArchiver', javadocDir: 'gameoflife-core/target/site/apidocs/'])
+        //archive the WAR
+        step([$class: 'ArtifactArchiver', artifacts: 'gameoflife-web/target/*.war'])
 
-    sh "mvn clean package"
-    
-    stage "Deploy to Azure"
+    stage 'Functional Test'
+        //Browser-based testing with Selenium and Firefox
+        sh """
+            cd gameoflife-acceptance-tests
+            mvn -Plocal -Dwebdriver.base.url=http://localhost:9090 verify
+        """
 
-    withCredentials([[$class: 'UsernamePasswordMultiBinding', 
-        credentialsId: 'azure-deployment-id', 
-        passwordVariable: '_password', 
-        usernameVariable: '_user']]) {
-
-        sh "curl -T ${local_path}/${war} ftps://\"${env._user}\":${env._password}@${env.azureHost}${target}/"
-    }
-    
-    stage "Verify deployment"
-    
-    retry(count: 5) { 
-        echo "Checking for the application at ${env.svchost}/gameoflife"
-        sh "sleep 5 && curl ${env.svchost}/gameoflife"
-    }
-
+    stage 'Docker Build and Publish'
+        //build images from Dockerfile(s)
+        def seleniumImage = docker.build('gameoflife-selenium', '.')
+        def appImage = docker.build('kishorebhatia/game-of-life', 'gameoflife-web')
+        //push to DockerHub
+        docker.withRegistry('', 'dockerhub-credentials') {
+            appImage.push('latest')
+        }
 }
-
-def ensureMaven() {
-    env.PATH = "${tool 'maven-3.3'}/bin:${env.PATH}"
-}
-
 
 
 
